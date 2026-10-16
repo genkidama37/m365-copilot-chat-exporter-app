@@ -1,6 +1,4 @@
 using CopilotChatExporter.Core.Models;
-using CopilotChatExporter.Core.Services;
-using Microsoft.Data.Sqlite;
 
 namespace CopilotChatExporter.Core.Tests;
 
@@ -73,9 +71,11 @@ public class HtmlExporterTests
             Assert.Contains("<style>", html, StringComparison.Ordinal);
             Assert.Contains("@media (prefers-color-scheme: dark)", html, StringComparison.Ordinal);
 
-            // Distinct speech-bubble styling for prompt and response
+            // Distinct speech-bubble styling & ubiquitous language role headers (Prompt / Response)
             Assert.Contains("speech-bubble prompt-bubble", html, StringComparison.Ordinal);
             Assert.Contains("speech-bubble response-bubble", html, StringComparison.Ordinal);
+            Assert.Contains("<div class=\"bubble-role\">Prompt</div>", html, StringComparison.Ordinal);
+            Assert.Contains("<div class=\"bubble-role\">Response</div>", html, StringComparison.Ordinal);
 
             // HTML escaping in prompt
             Assert.Contains("Show the latency table and failover config for &lt;East &amp; West&gt;.", html, StringComparison.Ordinal);
@@ -143,7 +143,7 @@ public class HtmlExporterTests
 
         var secondConversation = new Conversation(
             Id: "conv-idx-002",
-            Title: "Zero Trust Network Rollout",
+            Title: "C# Zero Trust Rollout",
             CreatedAt: new DateTimeOffset(2026, 2, 14, 15, 45, 0, TimeSpan.Zero),
             UpdatedAt: new DateTimeOffset(2026, 2, 14, 16, 0, 0, TimeSpan.Zero),
             Turns:
@@ -157,8 +157,16 @@ public class HtmlExporterTests
                     Citations: [])
             ]);
 
+        var unexportedConversation = new Conversation(
+            Id: "conv-idx-003",
+            Title: "Unexported Draft Conversation",
+            CreatedAt: new DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero),
+            UpdatedAt: new DateTimeOffset(2026, 3, 1, 12, 5, 0, TimeSpan.Zero),
+            Turns: []);
+
         await harness.Service.IngestConversationAsync(firstConversation);
         await harness.Service.IngestConversationAsync(secondConversation);
+        await harness.Service.IngestConversationAsync(unexportedConversation);
 
         var outputDir = Path.Combine(Path.GetTempPath(), $"copilot-index-test-{Guid.NewGuid():N}");
         try
@@ -180,27 +188,31 @@ public class HtmlExporterTests
             Assert.Contains("<style>", indexHtml, StringComparison.Ordinal);
             Assert.Contains("@media (prefers-color-scheme: dark)", indexHtml, StringComparison.Ordinal);
 
-            // Summary table with Title, Date, Turn Count
+            // Summary table with sortable Title, Date, Turn Count columns
             Assert.Contains("<table", indexHtml, StringComparison.Ordinal);
-            Assert.Contains("Title", indexHtml, StringComparison.Ordinal);
-            Assert.Contains("Date", indexHtml, StringComparison.Ordinal);
-            Assert.Contains("Turn Count", indexHtml, StringComparison.Ordinal);
+            Assert.Contains("data-sort-col=\"0\">Title</th>", indexHtml, StringComparison.Ordinal);
+            Assert.Contains("data-sort-col=\"1\">Date</th>", indexHtml, StringComparison.Ordinal);
+            Assert.Contains("data-sort-col=\"2\"", indexHtml, StringComparison.Ordinal);
+            Assert.Contains("Turn Count</th>", indexHtml, StringComparison.Ordinal);
 
             Assert.Contains("Q1 Security Audit", indexHtml, StringComparison.Ordinal);
             Assert.Contains("2026-01-20", indexHtml, StringComparison.Ordinal);
             Assert.Contains(">2<", indexHtml, StringComparison.Ordinal);
 
-            Assert.Contains("Zero Trust Network Rollout", indexHtml, StringComparison.Ordinal);
+            Assert.Contains("C# Zero Trust Rollout", indexHtml, StringComparison.Ordinal);
             Assert.Contains("2026-02-14", indexHtml, StringComparison.Ordinal);
             Assert.Contains(">1<", indexHtml, StringComparison.Ordinal);
 
-            // Working relative links to both .html and .md files
+            // Unexported conversation is not listed in the exported bundle catalog
+            Assert.DoesNotContain("Unexported Draft Conversation", indexHtml, StringComparison.Ordinal);
+
+            // Working relative links to both .html and .md files (including URI-escaped '#' as %23)
             Assert.Contains($"href=\"{Path.GetFileName(htmlPath1)}\"", indexHtml, StringComparison.Ordinal);
             Assert.Contains($"href=\"{Path.GetFileName(mdPath1)}\"", indexHtml, StringComparison.Ordinal);
-            Assert.Contains($"href=\"{Path.GetFileName(htmlPath2)}\"", indexHtml, StringComparison.Ordinal);
-            Assert.Contains($"href=\"{Path.GetFileName(mdPath2)}\"", indexHtml, StringComparison.Ordinal);
+            Assert.Contains("href=\"2026-02-14 - C%23 Zero Trust Rollout.html\"", indexHtml, StringComparison.Ordinal);
+            Assert.Contains("href=\"2026-02-14 - C%23 Zero Trust Rollout.md\"", indexHtml, StringComparison.Ordinal);
 
-            // Embedded offline client-side search/filter JavaScript
+            // Embedded offline client-side search/filter and sorting JavaScript
             Assert.Contains("<input", indexHtml, StringComparison.Ordinal);
             Assert.Contains("<script>", indexHtml, StringComparison.Ordinal);
             Assert.DoesNotContain("<script src=", indexHtml, StringComparison.OrdinalIgnoreCase);
@@ -233,29 +245,5 @@ public class HtmlExporterTests
 
         Assert.DoesNotContain("http://", sanitized, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("https://", sanitized, StringComparison.OrdinalIgnoreCase);
-    }
-
-    private sealed class TestServiceHarness : IAsyncDisposable
-    {
-        private readonly SqliteConnection _connection;
-
-        private TestServiceHarness(SqliteConnection connection, ICopilotExportService service)
-        {
-            _connection = connection;
-            Service = service;
-        }
-
-        public ICopilotExportService Service { get; }
-
-        public static async Task<TestServiceHarness> CreateAsync()
-        {
-            var connection = new SqliteConnection("Filename=:memory:");
-            await connection.OpenAsync();
-            var service = new CopilotExportService(connection);
-            await service.InitializeAsync();
-            return new TestServiceHarness(connection, service);
-        }
-
-        public ValueTask DisposeAsync() => _connection.DisposeAsync();
     }
 }

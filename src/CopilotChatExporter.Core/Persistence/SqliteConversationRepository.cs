@@ -209,32 +209,98 @@ internal sealed class SqliteConversationRepository
 
     public async Task<IReadOnlyList<Conversation>> GetAllConversationsAsync(CancellationToken cancellationToken = default)
     {
-        var ids = new List<string>();
+        var conversationRows = new List<(string Id, string Title, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt)>();
         await using (var cmd = _connection.CreateCommand())
         {
             cmd.CommandText = """
-                SELECT id
+                SELECT id, title, created_at, updated_at
                 FROM conversations
                 ORDER BY created_at DESC, id ASC;
                 """;
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                ids.Add(reader.GetString(0));
+                conversationRows.Add((
+                    reader.GetString(0),
+                    reader.GetString(1),
+                    DateTimeOffset.Parse(reader.GetString(2), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+                    DateTimeOffset.Parse(reader.GetString(3), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)));
             }
         }
 
-        var conversations = new List<Conversation>(ids.Count);
-        foreach (var id in ids)
+        if (conversationRows.Count == 0)
         {
-            var conversation = await GetConversationAsync(id, cancellationToken);
-            if (conversation is not null)
+            return [];
+        }
+
+        var citationsByTurnId = new Dictionary<string, List<Citation>>(StringComparer.Ordinal);
+        await using (var citationsCmd = _connection.CreateCommand())
+        {
+            citationsCmd.CommandText = """
+                SELECT turn_id, id, title, url
+                FROM citations
+                ORDER BY turn_id ASC, sequence_number ASC;
+                """;
+            await using var citationsReader = await citationsCmd.ExecuteReaderAsync(cancellationToken);
+            while (await citationsReader.ReadAsync(cancellationToken))
             {
-                conversations.Add(conversation);
+                var turnId = citationsReader.GetString(0);
+                if (!citationsByTurnId.TryGetValue(turnId, out var list))
+                {
+                    list = [];
+                    citationsByTurnId[turnId] = list;
+                }
+
+                list.Add(new Citation(
+                    Id: citationsReader.GetString(1),
+                    Title: citationsReader.GetString(2),
+                    Url: citationsReader.GetString(3)));
             }
         }
 
-        return conversations;
+        var turnsByConversationId = new Dictionary<string, List<Turn>>(StringComparer.Ordinal);
+        await using (var turnsCmd = _connection.CreateCommand())
+        {
+            turnsCmd.CommandText = """
+                SELECT conversation_id, id, sequence_number, prompt, response, created_at
+                FROM turns
+                ORDER BY conversation_id ASC, sequence_number ASC;
+                """;
+            await using var turnsReader = await turnsCmd.ExecuteReaderAsync(cancellationToken);
+            while (await turnsReader.ReadAsync(cancellationToken))
+            {
+                var convId = turnsReader.GetString(0);
+                var turnId = turnsReader.GetString(1);
+                if (!turnsByConversationId.TryGetValue(convId, out var list))
+                {
+                    list = [];
+                    turnsByConversationId[convId] = list;
+                }
+
+                var citations = citationsByTurnId.TryGetValue(turnId, out var turnCitations)
+                    ? (IReadOnlyList<Citation>)turnCitations
+                    : [];
+
+                list.Add(new Turn(
+                    Id: turnId,
+                    SequenceNumber: turnsReader.GetInt32(2),
+                    Prompt: turnsReader.GetString(3),
+                    Response: turnsReader.GetString(4),
+                    CreatedAt: DateTimeOffset.Parse(turnsReader.GetString(5), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+                    Citations: citations));
+            }
+        }
+
+        var result = new List<Conversation>(conversationRows.Count);
+        foreach (var row in conversationRows)
+        {
+            var turns = turnsByConversationId.TryGetValue(row.Id, out var convTurns)
+                ? (IReadOnlyList<Turn>)convTurns
+                : [];
+            result.Add(new Conversation(row.Id, row.Title, row.CreatedAt, row.UpdatedAt, turns));
+        }
+
+        return result;
     }
 
     private async Task EnableForeignKeysAsync(CancellationToken cancellationToken)

@@ -26,47 +26,27 @@ public sealed class CopilotExportService : ICopilotExportService
     public Task<Conversation?> GetConversationAsync(string conversationId, CancellationToken cancellationToken = default)
         => _repository.GetConversationAsync(conversationId, cancellationToken);
 
-    public async Task<string> ExportConversationToMarkdownAsync(
+    public Task<string> ExportConversationToMarkdownAsync(
         string conversationId,
         string outputDirectory,
         CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(conversationId);
-        ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
+        => ExportConversationAsync(
+            conversationId,
+            outputDirectory,
+            ".md",
+            MarkdownExporter.FormatConversation,
+            cancellationToken);
 
-        var conversation = await _repository.GetConversationAsync(conversationId, cancellationToken)
-            ?? throw new InvalidOperationException($"Conversation '{conversationId}' was not found.");
-
-        Directory.CreateDirectory(outputDirectory);
-
-        var fileName = MarkdownExporter.BuildSanitizedFileName(conversation.CreatedAt, conversation.Title, ".md");
-        var filePath = Path.Combine(outputDirectory, fileName);
-        var markdown = MarkdownExporter.FormatConversation(conversation);
-
-        await File.WriteAllTextAsync(filePath, markdown, Utf8WithoutBom, cancellationToken);
-        return filePath;
-    }
-
-    public async Task<string> ExportConversationToHtmlAsync(
+    public Task<string> ExportConversationToHtmlAsync(
         string conversationId,
         string outputDirectory,
         CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(conversationId);
-        ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
-
-        var conversation = await _repository.GetConversationAsync(conversationId, cancellationToken)
-            ?? throw new InvalidOperationException($"Conversation '{conversationId}' was not found.");
-
-        Directory.CreateDirectory(outputDirectory);
-
-        var fileName = MarkdownExporter.BuildSanitizedFileName(conversation.CreatedAt, conversation.Title, ".html");
-        var filePath = Path.Combine(outputDirectory, fileName);
-        var html = HtmlExporter.FormatConversation(conversation);
-
-        await File.WriteAllTextAsync(filePath, html, Utf8WithoutBom, cancellationToken);
-        return filePath;
-    }
+        => ExportConversationAsync(
+            conversationId,
+            outputDirectory,
+            ".html",
+            HtmlExporter.FormatConversation,
+            cancellationToken);
 
     public async Task<string> ExportMasterIndexAsync(
         string outputDirectory,
@@ -76,11 +56,54 @@ public sealed class CopilotExportService : ICopilotExportService
 
         Directory.CreateDirectory(outputDirectory);
 
-        var conversations = await _repository.GetAllConversationsAsync(cancellationToken);
+        var allConversations = await _repository.GetAllConversationsAsync(cancellationToken);
+        var exportedConversations = allConversations
+            .Where(c => HasExportedFilesInDirectory(c, outputDirectory))
+            .ToList();
+
+        var conversationsToIndex = exportedConversations.Count > 0
+            ? exportedConversations
+            : allConversations;
+
         var indexPath = Path.Combine(outputDirectory, "index.html");
-        var indexHtml = HtmlExporter.FormatMasterIndex(conversations);
+        var indexHtml = HtmlExporter.FormatMasterIndex(conversationsToIndex);
 
         await File.WriteAllTextAsync(indexPath, indexHtml, Utf8WithoutBom, cancellationToken);
         return indexPath;
+    }
+
+    private async Task<string> ExportConversationAsync(
+        string conversationId,
+        string outputDirectory,
+        string extension,
+        Func<Conversation, string> formatter,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(conversationId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
+
+        var conversation = await _repository.GetConversationAsync(conversationId, cancellationToken)
+            ?? throw new InvalidOperationException($"Conversation '{conversationId}' was not found.");
+
+        Directory.CreateDirectory(outputDirectory);
+
+        var fileName = ExportFileNameBuilder.BuildSanitizedFileName(conversation.CreatedAt, conversation.Title, extension);
+        var filePath = Path.Combine(outputDirectory, fileName);
+        var content = formatter(conversation);
+
+        await File.WriteAllTextAsync(filePath, content, Utf8WithoutBom, cancellationToken);
+        return filePath;
+    }
+
+    private static bool HasExportedFilesInDirectory(Conversation conversation, string outputDirectory)
+    {
+        var htmlPath = Path.Combine(
+            outputDirectory,
+            ExportFileNameBuilder.BuildSanitizedFileName(conversation.CreatedAt, conversation.Title, ".html"));
+        var mdPath = Path.Combine(
+            outputDirectory,
+            ExportFileNameBuilder.BuildSanitizedFileName(conversation.CreatedAt, conversation.Title, ".md"));
+
+        return File.Exists(htmlPath) || File.Exists(mdPath);
     }
 }
