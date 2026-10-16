@@ -133,3 +133,10 @@ Or target only the core test project:
 ```bash
 dotnet test tests/CopilotChatExporter.Core.Tests
 ```
+
+---
+
+## License
+
+This project is licensed under the [Mozilla Public License 2.0 (MPL-2.0)](LICENSE).
+
