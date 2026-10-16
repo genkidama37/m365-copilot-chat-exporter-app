@@ -17,4 +17,13 @@ public interface ICopilotExportService
         string conversationId,
         string outputDirectory,
         CancellationToken cancellationToken = default);
+
+    Task<string> ExportConversationToHtmlAsync(
+        string conversationId,
+        string outputDirectory,
+        CancellationToken cancellationToken = default);
+
+    Task<string> ExportMasterIndexAsync(
+        string outputDirectory,
+        CancellationToken cancellationToken = default);
 }

@@ -9,21 +9,21 @@ An end-to-end export capability that generates 100% self-contained offline HTML 
 
 ## Acceptance Criteria
 
-- [ ] **Self-Contained HTML Output**:
+- [x] **Self-Contained HTML Output**:
   - Produces valid standalone HTML5 files named `{YYYY-MM-DD} - {SanitizedTitle}.html`.
   - All CSS is embedded directly in `<style>` blocks—zero `<link rel="stylesheet">` to remote CDNs and zero external script tags.
   - Turns are rendered with distinct speech-bubble styling for user prompts and Copilot responses.
   - Pre-formatted code blocks and tables render cleanly.
   - Includes `@media (prefers-color-scheme: dark)` styling adapting automatically to operating system dark mode.
-- [ ] **Citation Footnotes in HTML**:
+- [x] **Citation Footnotes in HTML**:
   - Citations render as interactive badges linking to bottom footnote source references with clickable hyperlinks.
-- [ ] **Master Index Dashboard (`index.html`)**:
+- [x] **Master Index Dashboard (`index.html`)**:
   - Generates a root `index.html` summary file listing all exported conversations in a table (Title, Date, Turn Count).
   - Includes working relative hyperlinks to each conversation's `.html` and `.md` files.
   - Table includes embedded client-side search/filtering JavaScript that works offline without external libraries.
-- [ ] **Air-Gapped Offline Verification**:
+- [x] **Air-Gapped Offline Verification**:
   - Test verifies generated HTML documents contain no external URL resources (`http://` or `https://` in `<link>`, `<script>`, or `@import`) except hyperlinked citation URLs in `href`.
-- [ ] **Automated Seam Verification**:
+- [x] **Automated Seam Verification**:
   - Integration tests in `CopilotChatExporter.Core.Tests` verify HTML export generation and master index generation against test fixtures.
 
 ## Verification

@@ -46,4 +46,41 @@ public sealed class CopilotExportService : ICopilotExportService
         await File.WriteAllTextAsync(filePath, markdown, Utf8WithoutBom, cancellationToken);
         return filePath;
     }
+
+    public async Task<string> ExportConversationToHtmlAsync(
+        string conversationId,
+        string outputDirectory,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(conversationId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
+
+        var conversation = await _repository.GetConversationAsync(conversationId, cancellationToken)
+            ?? throw new InvalidOperationException($"Conversation '{conversationId}' was not found.");
+
+        Directory.CreateDirectory(outputDirectory);
+
+        var fileName = MarkdownExporter.BuildSanitizedFileName(conversation.CreatedAt, conversation.Title, ".html");
+        var filePath = Path.Combine(outputDirectory, fileName);
+        var html = HtmlExporter.FormatConversation(conversation);
+
+        await File.WriteAllTextAsync(filePath, html, Utf8WithoutBom, cancellationToken);
+        return filePath;
+    }
+
+    public async Task<string> ExportMasterIndexAsync(
+        string outputDirectory,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
+
+        Directory.CreateDirectory(outputDirectory);
+
+        var conversations = await _repository.GetAllConversationsAsync(cancellationToken);
+        var indexPath = Path.Combine(outputDirectory, "index.html");
+        var indexHtml = HtmlExporter.FormatMasterIndex(conversations);
+
+        await File.WriteAllTextAsync(indexPath, indexHtml, Utf8WithoutBom, cancellationToken);
+        return indexPath;
+    }
 }

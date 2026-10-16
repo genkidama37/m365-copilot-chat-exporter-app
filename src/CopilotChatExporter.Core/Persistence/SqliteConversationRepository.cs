@@ -207,6 +207,36 @@ internal sealed class SqliteConversationRepository
             Turns: turns);
     }
 
+    public async Task<IReadOnlyList<Conversation>> GetAllConversationsAsync(CancellationToken cancellationToken = default)
+    {
+        var ids = new List<string>();
+        await using (var cmd = _connection.CreateCommand())
+        {
+            cmd.CommandText = """
+                SELECT id
+                FROM conversations
+                ORDER BY created_at DESC, id ASC;
+                """;
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                ids.Add(reader.GetString(0));
+            }
+        }
+
+        var conversations = new List<Conversation>(ids.Count);
+        foreach (var id in ids)
+        {
+            var conversation = await GetConversationAsync(id, cancellationToken);
+            if (conversation is not null)
+            {
+                conversations.Add(conversation);
+            }
+        }
+
+        return conversations;
+    }
+
     private async Task EnableForeignKeysAsync(CancellationToken cancellationToken)
     {
         await using var pragmaCmd = _connection.CreateCommand();
