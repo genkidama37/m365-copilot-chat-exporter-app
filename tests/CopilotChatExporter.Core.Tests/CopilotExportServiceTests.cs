@@ -9,11 +9,7 @@ public class CopilotExportServiceTests
     [Fact]
     public async Task Ingesting_conversation_with_turns_and_citations_persists_with_exact_relational_integrity_and_timestamps()
     {
-        await using var connection = new SqliteConnection("Filename=:memory:");
-        await connection.OpenAsync();
-
-        ICopilotExportService service = new CopilotExportService(connection);
-        await service.InitializeAsync();
+        await using var harness = await TestServiceHarness.CreateAsync();
 
         var createdAt = new DateTimeOffset(2026, 3, 15, 9, 30, 0, TimeSpan.Zero);
         var updatedAt = new DateTimeOffset(2026, 3, 15, 9, 35, 42, TimeSpan.Zero);
@@ -59,9 +55,9 @@ public class CopilotExportServiceTests
                     ])
             ]);
 
-        await service.IngestConversationAsync(conversation);
+        await harness.Service.IngestConversationAsync(conversation);
 
-        var persisted = await service.GetConversationAsync("conv-001");
+        var persisted = await harness.Service.GetConversationAsync("conv-001");
 
         Assert.NotNull(persisted);
         Assert.Equal("conv-001", persisted.Id);
@@ -99,11 +95,7 @@ public class CopilotExportServiceTests
     [Fact]
     public async Task Exporting_ingested_conversation_to_markdown_writes_sanitized_file_with_frontmatter_turns_and_footnote_citations()
     {
-        await using var connection = new SqliteConnection("Filename=:memory:");
-        await connection.OpenAsync();
-
-        ICopilotExportService service = new CopilotExportService(connection);
-        await service.InitializeAsync();
+        await using var harness = await TestServiceHarness.CreateAsync();
 
         var createdAt = new DateTimeOffset(2026, 4, 10, 14, 0, 0, TimeSpan.Zero);
         var updatedAt = new DateTimeOffset(2026, 4, 10, 14, 12, 30, TimeSpan.Zero);
@@ -147,12 +139,12 @@ public class CopilotExportServiceTests
                     ])
             ]);
 
-        await service.IngestConversationAsync(conversation);
+        await harness.Service.IngestConversationAsync(conversation);
 
         var outputDir = Path.Combine(Path.GetTempPath(), $"copilot-export-test-{Guid.NewGuid():N}");
         try
         {
-            var filePath = await service.ExportConversationToMarkdownAsync("conv-2026-042", outputDir);
+            var filePath = await harness.Service.ExportConversationToMarkdownAsync("conv-2026-042", outputDir);
 
             Assert.Equal("2026-04-10 - Q3Q4 Budget & Roadmap Draft.md", Path.GetFileName(filePath));
             Assert.True(File.Exists(filePath));
@@ -205,5 +197,29 @@ public class CopilotExportServiceTests
                 Directory.Delete(outputDir, recursive: true);
             }
         }
+    }
+
+    private sealed class TestServiceHarness : IAsyncDisposable
+    {
+        private readonly SqliteConnection _connection;
+
+        private TestServiceHarness(SqliteConnection connection, ICopilotExportService service)
+        {
+            _connection = connection;
+            Service = service;
+        }
+
+        public ICopilotExportService Service { get; }
+
+        public static async Task<TestServiceHarness> CreateAsync()
+        {
+            var connection = new SqliteConnection("Filename=:memory:");
+            await connection.OpenAsync();
+            var service = new CopilotExportService(connection);
+            await service.InitializeAsync();
+            return new TestServiceHarness(connection, service);
+        }
+
+        public ValueTask DisposeAsync() => _connection.DisposeAsync();
     }
 }
