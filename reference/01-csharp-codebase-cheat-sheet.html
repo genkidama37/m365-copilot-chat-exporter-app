@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Reference 01: C# / .NET 10 Cheat Sheet for M365 Copilot Chat Exporter</title>
+  <link rel="stylesheet" href="../assets/tufte-course.css" />
+</head>
+<body>
+  <main>
+    <nav class="course-nav">
+      <span>Reference 01 &middot; Printable Cheat Sheet</span>
+      <span><a href="../lessons/0001-reading-the-domain-and-seam.html">&larr; Lesson 0001: Domain &amp; Seam</a></span>
+    </nav>
+
+    <h1>C# 12+ / .NET 10 Rosetta Stone</h1>
+    <p class="subtitle">Every C# construct in <code>CopilotChatExporter.Core</code> mapped to TypeScript, Python, and Java.</p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>C# Construct in Repo</th>
+          <th>Where It Appears</th>
+          <th>TypeScript / Python / Java Equivalent</th>
+          <th>What to Watch For in Code Review</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>public sealed record Turn(...)</code></td>
+          <td><code>Models/Turn.cs</code><br/><code>Models/Conversation.cs</code><br/><code>Models/Citation.cs</code></td>
+          <td>
+            <strong>TS:</strong> <code>Readonly&lt;{ ... }&gt;</code><br/>
+            <strong>Py:</strong> <code>@dataclass(frozen=True)</code><br/>
+            <strong>Java:</strong> <code>public record Turn(...)</code>
+          </td>
+          <td>
+            <code>record</code> generates <code>init</code>-only properties and value equality automatically (<a href="https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/builtin-types/record" target="_blank" rel="noopener">MS Learn</a>). Watch out: passing <code>List&lt;T&gt;</code> instead of <code>IReadOnlyList&lt;T&gt;</code> allows callers to mutate collection contents.
+          </td>
+        </tr>
+        <tr>
+          <td><code>IReadOnlyList&lt;Turn&gt;</code></td>
+          <td><code>Conversation.Turns</code><br/><code>Turn.Citations</code></td>
+          <td>
+            <strong>TS:</strong> <code>readonly Turn[]</code><br/>
+            <strong>Py:</strong> <code>Sequence[Turn]</code><br/>
+            <strong>Java:</strong> <code>List&lt;Turn&gt;</code> (unmodifiable)
+          </td>
+          <td>
+            Prevents callers from calling <code>.Add()</code> or <code>.Clear()</code> on domain collections. Initialized cleanly with collection expressions: <code>[turn1, turn2]</code> or <code>[]</code>.
+          </td>
+        </tr>
+        <tr>
+          <td><code>Task&lt;Conversation?&gt;</code> &amp; <code>CancellationToken</code></td>
+          <td><code>ICopilotExportService.cs</code></td>
+          <td>
+            <strong>TS:</strong> <code>Promise&lt;Conversation | null&gt;</code> + <code>AbortSignal</code><br/>
+            <strong>Py:</strong> <code>Awaitable[Conversation | None]</code>
+          </td>
+          <td>
+            <code>?</code> marks explicit nullability (because <code>&lt;Nullable&gt;enable&lt;/Nullable&gt;</code> is active in all <code>.csproj</code> files). Async methods must forward <code>cancellationToken</code> to all I/O calls.
+          </td>
+        </tr>
+        <tr>
+          <td><code>await using var harness = ...</code></td>
+          <td><code>CopilotExportServiceTests.cs</code><br/><code>SqliteConversationRepository.cs</code></td>
+          <td>
+            <strong>TS:</strong> <code>await using x = ...</code><br/>
+            <strong>Py:</strong> <code>async with ... as x:</code><br/>
+            <strong>Java:</strong> <code>try (var x = ...)</code>
+          </td>
+          <td>
+            Calls <code>DisposeAsync()</code> deterministically at the end of the current block scope—closing SQLite connections, transactions, and data readers even if an exception is thrown.
+          </td>
+        </tr>
+        <tr>
+          <td><code>var x = await GetAsync(...) ?? throw new InvalidOperationException(...)</code></td>
+          <td><code>CopilotExportService.cs</code></td>
+          <td>
+            <strong>TS:</strong> Nullish coalescing (<code>??</code>) with throw expression
+          </td>
+          <td>
+            Unwraps a nullable <code>Conversation?</code> into a non-null <code>Conversation</code> in one expression, or fails fast with a clear domain error.
+          </td>
+        </tr>
+        <tr>
+          <td><code>internal static class HtmlExporter</code></td>
+          <td><code>Exporters/HtmlExporter.cs</code><br/><code>Exporters/MarkdownExporter.cs</code></td>
+          <td>
+            <strong>TS/Py:</strong> Module-private pure functions<br/>
+            <strong>Java:</strong> Package-private utility class
+          </td>
+          <td>
+            <code>internal</code> hides implementation modules inside <code>CopilotChatExporter.Core</code> so tests and UI projects must go through the public seam (<code>ICopilotExportService</code>).
+          </td>
+        </tr>
+        <tr>
+          <td><code>""" ... """</code> (Raw String Literal)</td>
+          <td><code>SqliteConversationRepository.cs</code><br/><code>HtmlExporter.cs</code></td>
+          <td>
+            <strong>Py:</strong> Triple-quoted <code>"""..."""</code> with automatic dedent<br/>
+            <strong>Java:</strong> Text blocks <code>"""..."""</code>
+          </td>
+          <td>
+            Leading whitespace up to the closing <code>"""</code> column is automatically stripped by the C# compiler. Ideal for SQL schemas, HTML templates, and test fixtures.
+          </td>
+        </tr>
+      </tbody>
+    </table>
+
+    <footer class="lesson-footer">
+      <p>Return to <a href="../lessons/0001-reading-the-domain-and-seam.html">Lesson 0001: Reading the Domain Models &amp; Primary Seam</a>.</p>
+    </footer>
+  </main>
+</body>
+</html>

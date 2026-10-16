@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lesson 0001: Reading the Domain Models &amp; Primary Seam</title>
+  <link rel="stylesheet" href="../assets/tufte-course.css" />
+</head>
+<body>
+  <main>
+    <nav class="course-nav">
+      <span>Lesson 0001 &middot; Zone of Proximal Development</span>
+      <span><a href="../reference/01-csharp-codebase-cheat-sheet.html">Reference 01: C# Cheat Sheet &rarr;</a></span>
+    </nav>
+
+    <h1>Lesson 0001: Reading the Domain Models &amp; Primary Seam</h1>
+    <p class="subtitle">How C# records, visibility modifiers, and async seams protect architecture in <code>CopilotChatExporter.Core</code>.</p>
+
+    <div class="margin-note">
+      <strong>Mission Link:</strong> Before tracing SQLite queries or HTML formatters, you need to read the core C# domain types (<code>Conversation</code>, <code>Turn</code>, <code>Citation</code>) and the public seam (<code>ICopilotExportService</code>) well enough to spot when an AI agent weakens immutability or leaks internals.
+    </div>
+
+    <h2>1. Positional <code>record</code> Models (`Models/*.cs`)</h2>
+    <p>
+      Open <code>src/CopilotChatExporter.Core/Models/Conversation.cs</code> and you will see the entire class file is only 10 lines long:
+    </p>
+    <pre><code>namespace CopilotChatExporter.Core.Models;
+
+public sealed record Conversation(
+    string Id,
+    string Title,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt,
+    IReadOnlyList&lt;Turn&gt; Turns);</code></pre>
+    <p>
+      In modern C# (<a href="https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/builtin-types/record" target="_blank" rel="noopener">Microsoft Learn: C# Records</a>), this single positional declaration instructs the compiler to synthesize:
+    </p>
+    <ul>
+      <li><strong>Immutable properties</strong> (<code>{ get; init; }</code>) for <code>Id</code>, <code>Title</code>, <code>CreatedAt</code>, <code>UpdatedAt</code>, and <code>Turns</code>.</li>
+      <li><strong>Value-based equality</strong> (<code>Equals</code> and <code>GetHashCode</code> compare the fields, not object memory addresses).</li>
+      <li><strong>Non-destructive mutation</strong> via <code>with</code> expressions (e.g., <code>conversation with { Title = "New" }</code>).</li>
+    </ul>
+    <p>
+      Notice two deliberate choices: <code>DateTimeOffset</code> (which always preserves the UTC offset alongside the clock time, unlike ambiguous local <code>DateTime</code>) and <code>IReadOnlyList&lt;Turn&gt;</code> (which prevents any caller from mutating the list after construction).
+    </p>
+
+    <h2>2. The Deep Module Seam (`ICopilotExportService`)</h2>
+    <p>
+      In <code>src/CopilotChatExporter.Core/</code>, notice which classes are marked <code>public</code> versus <code>internal</code>:
+    </p>
+    <ul>
+      <li><strong>Public (The Seam):</strong> <code>ICopilotExportService</code>, <code>CopilotExportService</code>, and the 3 models (<code>Conversation</code>, <code>Turn</code>, <code>Citation</code>).</li>
+      <li><strong>Internal (Hidden Implementation):</strong> <code>SqliteConversationRepository</code>, <code>MarkdownExporter</code>, <code>HtmlExporter</code>, and <code>ExportFileNameBuilder</code>.</li>
+    </ul>
+    <p>
+      In .NET, <code>internal</code> means <em>visible only inside the same compiled assembly (<code>.csproj</code>)</em>. Because <code>tests/CopilotChatExporter.Core.Tests</code> is a separate project, tests <strong>cannot</strong> call <code>HtmlExporter</code> or <code>SqliteConversationRepository</code> directly—the compiler enforces that tests talk only to the primary seam (<a href="https://web.stanford.edu/~ouster/cgi-bin/book.php" target="_blank" rel="noopener">Ousterhout, <em>A Philosophy of Software Design</em></a>).
+    </p>
+
+    <pre><code>public interface ICopilotExportService
+{
+    Task InitializeAsync(CancellationToken cancellationToken = default);
+    Task IngestConversationAsync(Conversation conversation, CancellationToken cancellationToken = default);
+    Task&lt;Conversation?&gt; GetConversationAsync(string conversationId, CancellationToken cancellationToken = default);
+    Task&lt;string&gt; ExportConversationToMarkdownAsync(string conversationId, string outputDirectory, CancellationToken cancellationToken = default);
+    Task&lt;string&gt; ExportConversationToHtmlAsync(string conversationId, string outputDirectory, CancellationToken cancellationToken = default);
+    Task&lt;string&gt; ExportMasterIndexAsync(string outputDirectory, CancellationToken cancellationToken = default);
+}</code></pre>
+    <p>
+      Every method returns a <code>Task</code> or <code>Task&lt;T&gt;</code> (<a href="https://learn.microsoft.com/en-us/dotnet/csharp/asynchronous-programming/" target="_blank" rel="noopener">Microsoft Learn: Async/Await</a>) and accepts an optional <code>CancellationToken</code>. Both <code>ICopilotExportService.GetConversationAsync</code> and the internal <code>_repository.GetConversationAsync</code> return <code>Task&lt;Conversation?&gt;</code>. When you write <code>var conversation = await _repository.GetConversationAsync(...);</code>, <code>await</code> unwraps the <code>Task</code> and <code>var</code> infers the type <code>Conversation?</code> (a <code>Conversation</code> or <code>null</code> if the ID is not in SQLite).
+    </p>
+
+    <h3>How Seam Tests Boot and Clean Up (<code>xUnit</code> &amp; <code>await using</code>)</h3>
+    <p>
+      In <code>tests/CopilotChatExporter.Core.Tests/</code>, our automated tests use <strong>xUnit</strong> (<a href="https://xunit.net/docs/shared-context" target="_blank" rel="noopener">xUnit.net Docs</a>), where each test method is marked with <code>[Fact]</code>. Every test starts with this line:
+    </p>
+    <pre><code>await using var harness = await TestServiceHarness.CreateAsync();</code></pre>
+    <p>
+      And if you inspect <code>tests/CopilotChatExporter.Core.Tests/TestServiceHarness.cs</code>, here is what <code>TestServiceHarness</code> holds and implements:
+    </p>
+    <pre><code>internal sealed class TestServiceHarness : IAsyncDisposable
+{
+    private readonly SqliteConnection _connection;
+    // Opens "Filename=:memory:" and initializes the SQLite schema...
+
+    public ValueTask DisposeAsync() =&gt; _connection.DisposeAsync();
+}</code></pre>
+    <p>
+      Notice the two <code>await</code> keywords on <code>await using var harness = await TestServiceHarness.CreateAsync();</code>:
+    </p>
+    <ul>
+      <li>The right-hand <code>await TestServiceHarness.CreateAsync()</code> opens a fresh in-memory SQLite connection (<code>Filename=:memory:</code>) and creates the tables.</li>
+      <li>The left-hand <code>await using var harness</code> tells the C# compiler to wrap the rest of the function's <code>{ ... }</code> block in a <code>try { ... } finally { await harness.DisposeAsync(); }</code>—so the SQLite connection is closed no matter whether the test passes or throws an error halfway through.</li>
+    </ul>
+
+    <h2>3. Interactive Practice: Spot the Bug in the Agent Diff</h2>
+    <p>
+      Suppose an AI agent submits the following diff to add a helper method in <code>CopilotExportService.cs</code>. <strong>Click the single line in the diff that introduces a subtle bug:</strong>
+    </p>
+
+    <div class="diff-box" data-diff-spotter>
+      <button type="button" class="diff-line" data-diff-line data-bug="false" data-explanation="Not a bug: ArgumentException.ThrowIfNullOrWhiteSpace is the standard .NET guard clause for string arguments.">+ public async Task&lt;int&gt; GetTurnCountAsync(string conversationId, CancellationToken ct = default)</button>
+      <button type="button" class="diff-line" data-diff-line data-bug="false" data-explanation="Not a bug: Guarding conversationId at the public seam boundary fails fast on empty input.">+ {
++     ArgumentException.ThrowIfNullOrWhiteSpace(conversationId);</button>
+      <button type="button" class="diff-line" data-diff-line data-bug="false" data-explanation="Not a bug: Awaiting _repository.GetConversationAsync with ct is idiomatic and forwards cancellation.">+     var conversation = await _repository.GetConversationAsync(conversationId, ct);</button>
+      <button type="button" class="diff-line" data-diff-line data-bug="true" data-explanation="Bingo! GetConversationAsync returns Task<Conversation?>. Dereferencing conversation.Turns.Count without handling null (e.g. conversation?.Turns.Count ?? 0 or ?? throw) will throw a NullReferenceException when conversationId does not exist.">+     return conversation.Turns.Count;
++ }</button>
+      <div class="feedback-banner" data-diff-feedback></div>
+    </div>
+
+    <h2>4. Retrieval Practice (No-Clue Format)</h2>
+    <p>
+      Test your retention without looking back up. Select the right answer for each question:
+    </p>
+
+    <div class="quiz-card" data-quiz-card>
+      <p class="quiz-question">1. What does <code>public sealed record Citation(string Id, string Title, string Url);</code> create in C#?</p>
+      <div class="quiz-options">
+        <button type="button" class="quiz-option" data-option data-correct="false" data-explanation="Not quite: C# structs are value types, and records generate public init-only properties, not protected attributes.">Mutable pointer struct with protected attributes</button>
+        <button type="button" class="quiz-option" data-option data-correct="true" data-explanation="Correct! A positional record generates init-only (read-only) properties and value-based equality across all properties.">Immutable value record with read-only properties</button>
+        <button type="button" class="quiz-option" data-option data-correct="false" data-explanation="Not quite: sealed prevents inheritance, and positional records are concrete types you instantiate with new Citation(...).">Abstract static module with virtual constructors</button>
+      </div>
+      <div class="feedback-banner" data-feedback></div>
+    </div>
+
+    <div class="quiz-card" data-quiz-card>
+      <p class="quiz-question">2. In <code>ICopilotExportService</code>, what does the return type <code>Task&lt;Conversation?&gt;</code> signify?</p>
+      <div class="quiz-options">
+        <button type="button" class="quiz-option" data-option data-correct="true" data-explanation="Correct! Task<T> represents an async operation (like Promise<T>), and Conversation? indicates the result may be null.">Async result yielding Conversation or null</button>
+        <button type="button" class="quiz-option" data-option data-correct="false" data-explanation="Not quite: Task<T> is non-blocking when awaited, and ? denotes a nullable return value.">Sync thread blocking Conversation in queue</button>
+        <button type="button" class="quiz-option" data-option data-correct="false" data-explanation="Not quite: async streams in C# use IAsyncEnumerable<T>, whereas Task<Conversation?> resolves once.">Lazy stream mutating Conversation on error</button>
+      </div>
+      <div class="feedback-banner" data-feedback></div>
+    </div>
+
+    <div class="quiz-card" data-quiz-card>
+      <p class="quiz-question">3. Why do the xUnit tests declare <code>await using var harness = await TestServiceHarness.CreateAsync();</code>?</p>
+      <div class="quiz-options">
+        <button type="button" class="quiz-option" data-option data-correct="false" data-explanation="Not quite: namespace imports use top-level 'using Namespace;' directives, not 'await using var'.">Preloads unmanaged SQLite extensions at start</button>
+        <button type="button" class="quiz-option" data-option data-correct="false" data-explanation="Not quite: in-memory SQLite databases vanish when closed; 'await using' is about deterministic cleanup.">Persists temporary SQLite migrations to cache</button>
+        <button type="button" class="quiz-option" data-option data-correct="true" data-explanation="Correct! 'await using' invokes IAsyncDisposable.DisposeAsync() when the test exits, closing the in-memory SQLite connection.">Disposes in-memory SQLite connection on scope</button>
+      </div>
+      <div class="feedback-banner" data-feedback></div>
+    </div>
+
+    <h2>5. Recommended Primary Source &amp; Next Step</h2>
+    <p>
+      <strong>Primary Source Reading (5 mins):</strong> Skim <a href="https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/builtin-types/record" target="_blank" rel="noopener">Microsoft Learn: C# Records</a> to see how positional records, value equality, and <code>with</code> expressions behave under the hood.
+    </p>
+    <p>
+      <strong>Keep Reference 01 Handy:</strong> Bookmark or print <a href="../reference/01-csharp-codebase-cheat-sheet.html">Reference 01: C# / .NET 10 Rosetta Stone</a> for quick lookup while reading repo files.
+    </p>
+
+    <footer class="lesson-footer">
+      <p>
+        <strong>Ask your teacher:</strong> Come back to the chat and tell me how you did on the diff spotter and the 3 retrieval questions—or ask about anything in <code>Conversation.cs</code>, <code>ICopilotExportService.cs</code>, or <code>CopilotExportService.cs</code> that feels unfamiliar!
+      </p>
+    </footer>
+  </main>
+  <script src="../assets/lesson-interactive.js"></script>
+</body>
+</html>
