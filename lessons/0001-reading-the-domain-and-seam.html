@@ -20,7 +20,7 @@
       <strong>Mission Link:</strong> Before tracing SQLite queries or HTML formatters, you need to read the core C# domain types (<code>Conversation</code>, <code>Turn</code>, <code>Citation</code>) and the public seam (<code>ICopilotExportService</code>) well enough to spot when an AI agent weakens immutability or leaks internals.
     </div>
 
-    <h2>1. Positional <code>record</code> Models (`Models/*.cs`)</h2>
+    <h2>1. Positional <code>record</code> Models (<code>Models/*.cs</code>)</h2>
     <p>
       Open <code>src/CopilotChatExporter.Core/Models/Conversation.cs</code> and you will see the entire class file is only 10 lines long:
     </p>
@@ -33,27 +33,70 @@ public sealed record Conversation(
     DateTimeOffset UpdatedAt,
     IReadOnlyList&lt;Turn&gt; Turns);</code></pre>
     <p>
-      In modern C# (<a href="https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/builtin-types/record" target="_blank" rel="noopener">Microsoft Learn: C# Records</a>), this single positional declaration instructs the compiler to synthesize:
+      In modern C# (<a href="https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/builtin-types/record" target="_blank" rel="noopener">Microsoft Learn: C# Records</a>), declaring the properties in parentheses right after the record name is called a <strong>positional declaration</strong>—because the <em>position</em> (order) of the parameters defines the constructor and deconstructor without needing a <code>{ ... }</code> class body.
+    </p>
+    <p>
+      For example, when the C# compiler sees the 1-line positional declaration in <code>Citation.cs</code>:
+    </p>
+    <pre><code>public sealed record Citation(string Id, string Title, string Url);</code></pre>
+    <p>
+      It expands it behind the scenes into:
+    </p>
+    <pre><code>public sealed record Citation
+{
+    // 1. Read-only properties ('init' = can only be set during creation, then frozen)
+    public string Id { get; init; }
+    public string Title { get; init; }
+    public string Url { get; init; }
+
+    // 2. Positional constructor matching that exact parameter order
+    public Citation(string Id, string Title, string Url)
+    {
+        this.Id = Id;
+        this.Title = Title;
+        this.Url = Url;
+    }
+
+    // 3. Positional deconstructor: lets you unpack via var (id, title, url) = citation;
+    public void Deconstruct(out string Id, out string Title, out string Url)
+    {
+        Id = this.Id;
+        Title = this.Title;
+        Url = this.Url;
+    }
+}</code></pre>
+    <p>
+      Alongside those properties and constructors, <code>record</code> also synthesizes:
     </p>
     <ul>
-      <li><strong>Immutable properties</strong> (<code>{ get; init; }</code>) for <code>Id</code>, <code>Title</code>, <code>CreatedAt</code>, <code>UpdatedAt</code>, and <code>Turns</code>.</li>
       <li><strong>Value-based equality</strong> (<code>Equals</code> and <code>GetHashCode</code> compare the fields, not object memory addresses).</li>
-      <li><strong>Non-destructive mutation</strong> via <code>with</code> expressions (e.g., <code>conversation with { Title = "New" }</code>).</li>
+      <li><strong>Copy-and-update via <code>with</code> expressions</strong> ("non-destructive mutation"): like TypeScript's spread <code>{ ...conversation, title: "New" }</code> or Python's <code>dataclasses.replace(...)</code>, writing <code>var updated = conversation with { Title = "New" };</code> clones all existing fields into a new <code>Conversation</code> instance with only <code>Title</code> replaced—leaving the original <code>conversation</code> untouched.</li>
     </ul>
     <p>
-      Notice two deliberate choices: <code>DateTimeOffset</code> (which always preserves the UTC offset alongside the clock time, unlike ambiguous local <code>DateTime</code>) and <code>IReadOnlyList&lt;Turn&gt;</code> (which prevents any caller from mutating the list after construction).
+      Notice three more deliberate choices in our model declarations:
     </p>
+    <ul>
+      <li><strong><code>sealed</code></strong> (equivalent to Java's <code>final class</code> or Python's <code>@final</code>): forbids any class or record from inheriting from this type. That enforces composition over inheritance, keeps record value-equality simple, and lets the .NET 10 JIT compiler devirtualize method calls.</li>
+      <li><strong><code>DateTimeOffset</code></strong>: always preserves the UTC offset alongside the clock time, unlike ambiguous local <code>DateTime</code>.</li>
+      <li><strong><code>IReadOnlyList&lt;Turn&gt;</code></strong>: prevents any caller from mutating the list after construction.</li>
+    </ul>
 
-    <h2>2. The Deep Module Seam (`ICopilotExportService`)</h2>
+    <h2>2. The Deep Module Seam (<code>ICopilotExportService</code>)</h2>
     <p>
-      In <code>src/CopilotChatExporter.Core/</code>, notice which classes are marked <code>public</code> versus <code>internal</code>:
+      In software design, a <strong>seam</strong> is the junction where a caller meets a module's interface—allowing you to change or swap what happens on one side without editing the code on the other side. A <strong>deep module seam</strong> (<a href="https://web.stanford.edu/~ouster/cgi-bin/book.php" target="_blank" rel="noopener">Ousterhout, <em>A Philosophy of Software Design</em></a>) hides a large amount of work (SQLite queries, filename sanitization, HTML/Markdown formatting, and file I/O) behind a small interface.
+    </p>
+    <p>
+      In <code>src/CopilotChatExporter.Core/</code>, C# visibility modifiers enforce where our primary seam sits:
     </p>
     <ul>
       <li><strong>Public (The Seam):</strong> <code>ICopilotExportService</code>, <code>CopilotExportService</code>, and the 3 models (<code>Conversation</code>, <code>Turn</code>, <code>Citation</code>).</li>
-      <li><strong>Internal (Hidden Implementation):</strong> <code>SqliteConversationRepository</code>, <code>MarkdownExporter</code>, <code>HtmlExporter</code>, and <code>ExportFileNameBuilder</code>.</li>
+      <li><strong>Internal (Hidden Behind the Seam):</strong> <code>SqliteConversationRepository</code>, <code>MarkdownExporter</code>, <code>HtmlExporter</code>, and <code>ExportFileNameBuilder</code>.</li>
     </ul>
     <p>
-      In .NET, <code>internal</code> means <em>visible only inside the same compiled assembly (<code>.csproj</code>)</em>. Because <code>tests/CopilotChatExporter.Core.Tests</code> is a separate project, tests <strong>cannot</strong> call <code>HtmlExporter</code> or <code>SqliteConversationRepository</code> directly—the compiler enforces that tests talk only to the primary seam (<a href="https://web.stanford.edu/~ouster/cgi-bin/book.php" target="_blank" rel="noopener">Ousterhout, <em>A Philosophy of Software Design</em></a>).
+      In .NET, a <strong><code>.csproj</code> (C# Project) file</strong> is the equivalent of TypeScript's <code>package.json</code> + <code>tsconfig.json</code> (or Java's <code>pom.xml</code>) combined: it declares compiler settings, NuGet package dependencies, and links to other projects (<code>&lt;ProjectReference&gt;</code>), and compiles every <code>.cs</code> file in its folder into a single binary <code>.dll</code> file called a <strong>compiled assembly</strong> (equivalent to a Java <code>.jar</code>).
+    </p>
+    <p>
+      The keyword <code>internal</code> means <em>visible only inside the same compiled assembly (<code>.csproj</code>)</em>. Because <code>tests/CopilotChatExporter.Core.Tests/CopilotChatExporter.Core.Tests.csproj</code> and the UI app are separate <code>.csproj</code> projects that compile into their own assemblies, they <strong>cannot</strong> call <code>ExportFileNameBuilder</code> or <code>SqliteConversationRepository</code> directly—the compiler enforces that callers talk only to the primary seam.
     </p>
 
     <pre><code>public interface ICopilotExportService
@@ -142,7 +185,40 @@ public sealed record Conversation(
       <div class="feedback-banner" data-feedback></div>
     </div>
 
-    <h2>5. Recommended Primary Source &amp; Next Step</h2>
+    <h2>5. Session Q&amp;A Recap (Persisted from Discussion)</h2>
+    <dl>
+      <dt><strong>Q1: What do "Seam", "Public/Primary Seam", and "Deep Module Seam" mean?</strong></dt>
+      <dd>
+        Like a seam on a jacket where a sleeve is stitched on, a software <strong>seam</strong> (Michael Feathers) is the exact junction where a caller meets a module's interface—letting you swap or alter what happens on one side without editing the other side. In our repo, <code>ICopilotExportService</code> is the <strong>Public / Primary Seam</strong> because it is the single <code>public</code> doorway into <code>CopilotChatExporter.Core</code>. It is a <strong>Deep Module Seam</strong> (John Ousterhout) because a small 6-method interface hides a deep implementation (<code>SqliteConversationRepository</code>, <code>ExportFileNameBuilder</code>, <code>MarkdownExporter</code>, and <code>HtmlExporter</code>). Exposing an internal helper like <code>ExportFileNameBuilder</code> as <code>public</code> would break separation of concerns, multiply seams, and duplicate orchestration logic across callers.
+      </dd>
+
+      <dt><strong>Q2: Are there no tests for <code>SqliteConversationRepository.cs</code> or <code>HtmlExporter.cs</code>? Why?</strong></dt>
+      <dd>
+        They <em>are</em> thoroughly tested—just <strong>through the public seam (<code>ICopilotExportService</code>)</strong> rather than by calling those <code>internal</code> classes directly. <code>CopilotExportServiceTests.cs</code> tests SQLite persistence by calling <code>harness.Service.IngestConversationAsync(...)</code> and <code>GetConversationAsync(...)</code>; <code>HtmlExporterTests.cs</code> tests HTML rendering by calling <code>harness.Service.ExportConversationToHtmlAsync(...)</code> and inspecting the generated file. Testing through the seam gives us <strong>refactoring freedom</strong> (you can rename or split internal classes without breaking tests) and <strong>real integration confidence</strong> at unit-test speed (~1ms per in-memory SQLite test).
+      </dd>
+
+      <dt><strong>Q3: What does "positional declaration" mean when talking about Records?</strong></dt>
+      <dd>
+        It means declaring a record's properties as a parenthesized parameter list right after the type name—e.g. <code>public sealed record Citation(string Id, string Title, string Url);</code>—instead of writing a <code>{ ... }</code> class body by hand. The C# compiler expands that 1-liner into read-only <code>{ get; init; }</code> properties, a constructor whose parameters match that exact position/order, and a <code>Deconstruct</code> method for unpacking by position (<code>var (id, title, url) = citation;</code>).
+      </dd>
+
+      <dt><strong>Q4: What is the purpose of the <code>sealed</code> keyword?</strong></dt>
+      <dd>
+        <code>sealed</code> prevents any other class or record from inheriting from (subclassing) the type—equivalent to Java's <code>final class</code> or Python's <code>@final</code>. We mark our records and services <code>sealed</code> to enforce swappable interfaces over fragile class inheritance, keep <code>record</code> value-equality simple (no surprise subtypes with extra fields), and allow the .NET 10 JIT compiler to devirtualize and inline method calls.
+      </dd>
+
+      <dt><strong>Q5: What does "non-destructive mutation via <code>with</code> expressions" mean?</strong></dt>
+      <dd>
+        It is C#'s <strong>copy-and-update</strong> syntax for immutable records—equivalent to TypeScript's object spread <code>{ ...conversation, title: "New" }</code> or Python's <code>dataclasses.replace(conversation, title="New")</code>. Because a <code>record</code>'s properties are <code>init</code>-only (<code>conversation.Title = "New"</code> is a compiler error), writing <code>var updated = conversation with { Title = "New" };</code> instructs the compiler to construct a new <code>Conversation</code> copying every field from <code>conversation</code> except <code>Title</code>, leaving the original <code>conversation</code> untouched ("non-destructive").
+      </dd>
+
+      <dt><strong>Q6: What is a "compiled assembly" in C# and what is the role of the <code>.csproj</code> file?</strong></dt>
+      <dd>
+        A <strong><code>.csproj</code> (C# Project) file</strong> works like TypeScript's <code>package.json</code> + <code>tsconfig.json</code> (or Java's <code>pom.xml</code>) in one XML file: it configures compiler settings (like <code>&lt;TargetFramework&gt;net10.0&lt;/TargetFramework&gt;</code> and <code>&lt;Nullable&gt;enable&lt;/Nullable&gt;</code>), third-party NuGet packages (<code>&lt;PackageReference&gt;</code>), and links to other projects (<code>&lt;ProjectReference&gt;</code>). When you run <code>dotnet build</code>, all <code>.cs</code> files inside one <code>.csproj</code> folder compile into one <code>.dll</code> file (e.g. <code>CopilotChatExporter.Core.dll</code>), which .NET calls a <strong>compiled assembly</strong> (like a Java <code>.jar</code>). Because <code>1 .csproj = 1 compiled assembly</code>, marking a class <code>internal</code> makes it usable across all files inside that <code>.csproj</code> while hiding it from every other <code>.csproj</code>.
+      </dd>
+    </dl>
+
+    <h2>6. Recommended Primary Source &amp; Next Step</h2>
     <p>
       <strong>Primary Source Reading (5 mins):</strong> Skim <a href="https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/builtin-types/record" target="_blank" rel="noopener">Microsoft Learn: C# Records</a> to see how positional records, value equality, and <code>with</code> expressions behave under the hood.
     </p>
