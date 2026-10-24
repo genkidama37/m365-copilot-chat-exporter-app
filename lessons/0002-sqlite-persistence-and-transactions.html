@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lesson 0002: Tracing SQLite Persistence, Transactions &amp; Relational Reconstruction</title>
+  <link rel="stylesheet" href="../assets/tufte-course.css" />
+</head>
+<body>
+  <main>
+    <nav class="course-nav">
+      <span><a href="0001-reading-the-domain-and-seam.html">&larr; Lesson 0001: Domain &amp; Seam</a></span>
+      <span>Lesson 0002 &middot; SQLite Persistence</span>
+      <span><a href="../reference/01-csharp-codebase-cheat-sheet.html">Reference 01: C# Cheat Sheet &rarr;</a></span>
+    </nav>
+
+    <h1>Lesson 0002: Tracing SQLite Persistence, Transactions &amp; Relational Reconstruction</h1>
+    <p class="subtitle">How <code>SqliteConversationRepository.cs</code> saves and reconstructs immutable <code>Conversation</code> graphs using <code>Microsoft.Data.Sqlite</code>.</p>
+
+    <div class="margin-note">
+      <strong>Mission Link:</strong> Behind the <code>ICopilotExportService</code> seam sits <code>SqliteConversationRepository</code>. Mastering how it handles transactions, parameters, timestamps, and multi-table reads lets you catch data-corruption bugs and N+1 query bottlenecks in agent diffs.
+    </div>
+
+    <h2>1. Schema, Foreign Keys &amp; Raw String Literals (<code>"""..."""</code>)</h2>
+    <p>
+      Open <code>src/CopilotChatExporter.Core/Persistence/SqliteConversationRepository.cs</code> and look at <code>InitializeSchemaAsync</code> (lines 17&ndash;51):
+    </p>
+    <pre><code>public async Task InitializeSchemaAsync(CancellationToken cancellationToken = default)
+{
+    await using var command = _connection.CreateCommand();
+    command.CommandText = """
+        PRAGMA foreign_keys = ON;
+
+        CREATE TABLE IF NOT EXISTS conversations (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS turns (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            sequence_number INTEGER NOT NULL,
+            prompt TEXT NOT NULL,
+            response TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+        ...
+        """;
+    await command.ExecuteNonQueryAsync(cancellationToken);
+}</code></pre>
+    <p>
+      Two details are worth noting here:
+    </p>
+    <ul>
+      <li><strong>Raw String Literals (<code>""" ... """</code>):</strong> Introduced in C# 11, triple-quoted strings work like Python's <code>textwrap.dedent("""...""")</code> or Java text blocks. The compiler automatically strips all leading spaces up to the horizontal column of the closing <code>"""</code>, and you never need to escape quotes inside the string.</li>
+      <li><strong><code>PRAGMA foreign_keys = ON</code> + <code>ON DELETE CASCADE</code>:</strong> In SQLite (<a href="https://learn.microsoft.com/en-us/dotnet/standard/data/sqlite/" target="_blank" rel="noopener">Microsoft Learn: Microsoft.Data.Sqlite</a>), foreign-key constraints are disabled by default until <code>PRAGMA foreign_keys = ON;</code> is executed on the connection. Because <code>turns.conversation_id</code> references <code>conversations(id) ON DELETE CASCADE</code> (and <code>citations.turn_id</code> references <code>turns(id) ON DELETE CASCADE</code>), deleting one row in <code>conversations</code> automatically deletes all of its child rows in <code>turns</code> and <code>citations</code>.</li>
+    </ul>
+
+    <h2>2. Atomic Upserts: Transactions, Block-Scoped <code>await using</code> &amp; ISO-8601 Timestamps</h2>
+    <p>
+      Look at how <code>SaveConversationAsync</code> (lines 53&ndash;119) saves or updates a conversation:
+    </p>
+    <pre><code>public async Task SaveConversationAsync(Conversation conversation, CancellationToken cancellationToken = default)
+{
+    ArgumentNullException.ThrowIfNull(conversation);
+
+    await EnableForeignKeysAsync(cancellationToken);
+    await using var transaction = (SqliteTransaction)await _connection.BeginTransactionAsync(cancellationToken);
+
+    await using (var deleteExistingCmd = _connection.CreateCommand())
+    {
+        deleteExistingCmd.Transaction = transaction;
+        deleteExistingCmd.CommandText = "DELETE FROM conversations WHERE id = $id;";
+        deleteExistingCmd.Parameters.AddWithValue("$id", conversation.Id);
+        await deleteExistingCmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    await using (var insertConversationCmd = _connection.CreateCommand())
+    {
+        insertConversationCmd.Transaction = transaction;
+        insertConversationCmd.CommandText = """
+            INSERT INTO conversations (id, title, created_at, updated_at)
+            VALUES ($id, $title, $created_at, $updated_at);
+            """;
+        insertConversationCmd.Parameters.AddWithValue("$id", conversation.Id);
+        insertConversationCmd.Parameters.AddWithValue("$title", conversation.Title);
+        insertConversationCmd.Parameters.AddWithValue("$created_at", conversation.CreatedAt.ToString("O", CultureInfo.InvariantCulture));
+        insertConversationCmd.Parameters.AddWithValue("$updated_at", conversation.UpdatedAt.ToString("O", CultureInfo.InvariantCulture));
+        await insertConversationCmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+    // ... inserts turns and citations in a loop ...
+
+    await transaction.CommitAsync(cancellationToken);
+}</code></pre>
+    <p>
+      Notice four deliberate patterns working together:
+    </p>
+    <ol>
+      <li>
+        <strong>Delete-Then-Insert inside a Transaction:</strong> If you ingest <code>"conv-001"</code> a second time with updated turns, <code>DELETE FROM conversations WHERE id = $id;</code> cascades to wipe out the old turns and citations, and then the new rows are inserted. Because both happen inside <code>transaction</code>, no caller ever sees a half-deleted conversation.
+      </li>
+      <li>
+        <strong>Automatic Rollback via <code>await using var transaction</code>:</strong> Remember from <a href="0001-reading-the-domain-and-seam.html">Lesson 0001</a> that <code>await using var transaction</code> wraps the rest of the method in <code>try { ... } finally { await transaction.DisposeAsync(); }</code>. In <code>Microsoft.Data.Sqlite</code>, if an exception is thrown <em>before</em> <code>await transaction.CommitAsync(cancellationToken)</code> is called, <code>transaction.DisposeAsync()</code> <strong>automatically rolls back the entire transaction</strong>—leaving the database untouched.
+      </li>
+      <li>
+        <strong>Block-Scoped <code>await using (var cmd = ...) { ... }</code>:</strong> Why does <code>deleteExistingCmd</code> have explicit <code>{ ... }</code> braces around it while <code>transaction</code> does not? Because <code>transaction</code> must stay alive for the whole method, whereas each <code>SqliteCommand</code> should be disposed as soon as its query finishes, before creating the next command on the same connection.
+      </li>
+      <li>
+        <strong>Parameterized SQL (<code>$id</code>) &amp; ISO-8601 Round-Trip (<code>"O"</code>):</strong>
+        <ul>
+          <li><code>Parameters.AddWithValue("$id", conversation.Id)</code> binds parameters safely so a title containing quotes or SQL keywords never causes SQL injection or syntax errors.</li>
+          <li>SQLite stores timestamps as <code>TEXT</code>. Calling <code>conversation.CreatedAt.ToString("O", CultureInfo.InvariantCulture)</code> formats the timestamp using .NET's <strong>round-trip ISO-8601 specifier (<code>"O"</code>)</strong> (e.g., <code>"2026-03-15T09:30:00.0000000+00:00"</code>), and <code>CultureInfo.InvariantCulture</code> guarantees that the user's OS locale settings never alter date separators or digits.</li>
+        </ul>
+      </li>
+    </ol>
+
+    <h2>3. Reading Rows &amp; Preventing N+1 Queries (<code>GetAllConversationsAsync</code>)</h2>
+    <p>
+      When reading rows back, <code>await cmd.ExecuteReaderAsync(cancellationToken)</code> returns a <code>SqliteDataReader</code>—a forward-only cursor that starts positioned <em>before</em> the first row. Each call to <code>await reader.ReadAsync(cancellationToken)</code> advances to the next row and returns <code>true</code> (or <code>false</code> when no rows remain), and <code>reader.GetString(0)</code> / <code>reader.GetInt32(1)</code> reads column values by their zero-based position in the <code>SELECT</code> clause.
+    </p>
+    <p>
+      Now compare loading a single conversation (<code>GetConversationAsync</code>) with loading the entire catalog (<code>GetAllConversationsAsync</code>, lines 210&ndash;304). If <code>GetAllConversationsAsync</code> looped over 500 conversations and ran nested <code>SELECT</code> queries for each conversation's turns and each turn's citations, it would execute thousands of queries (the classic <strong>N+1 query problem</strong>). Instead, it runs <strong>3 flat queries total</strong> and stitches them together in memory:
+    </p>
+    <pre><code>// 1. Named Value Tuple list: lightweight row buffer (like Array&lt;{ Id: string, Title: string, ... }&gt; in TypeScript)
+var conversationRows = new List&lt;(string Id, string Title, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt)&gt;();
+
+// 2. Group all citations by turn_id in a Dictionary
+var citationsByTurnId = new Dictionary&lt;string, List&lt;Citation&gt;&gt;(StringComparer.Ordinal);
+// ... populates citationsByTurnId from 'SELECT turn_id, id, title, url FROM citations ...'
+
+// 3. Look up each turn's citations safely with TryGetValue
+var citations = citationsByTurnId.TryGetValue(turnId, out var turnCitations)
+    ? (IReadOnlyList&lt;Citation&gt;)turnCitations
+    : [];</code></pre>
+    <p>
+      Look closely at those two C# constructs:
+    </p>
+    <ul>
+      <li>
+        <strong>Named Value Tuples (<code>(string Id, string Title, ...)</code>):</strong> When you need a temporary row shape inside a method without declaring a whole new <code>record</code> file, C# lets you write parenthesized types with field names. You construct one with <code>(reader.GetString(0), reader.GetString(1), ...)</code> and read its fields by name (`row.Id`, `row.Title`).
+      </li>
+      <li>
+        <strong><code>Dictionary.TryGetValue(key, out var value)</code> vs. <code>dict[key]</code>:</strong>
+        In JavaScript/TypeScript, looking up a missing key on an object or <code>Map</code> returns <code>undefined</code>. <strong>In C#, indexing <code>citationsByTurnId[turnId]</code> on a missing key throws a <code>KeyNotFoundException</code>!</strong> Because a turn with zero citations has zero rows in the <code>citations</code> table, its <code>turnId</code> will not exist in <code>citationsByTurnId</code>. Calling <code>citationsByTurnId.TryGetValue(turnId, out var turnCitations)</code> performs a single hash lookup that returns <code>true</code> (and assigns the new variable <code>turnCitations</code>) if found, or returns <code>false</code> so we can fall back to the empty collection expression <code>[]</code>.
+      </li>
+    </ul>
+
+    <h2>4. Interactive Practice: Spot the Bug in the Agent Diff</h2>
+    <p>
+      Suppose an AI agent refactors the turn-reconstruction loop in <code>GetAllConversationsAsync</code> inside <code>SqliteConversationRepository.cs</code>. Remember from above that <code>citationsByTurnId</code> has type <code>Dictionary&lt;string, List&lt;Citation&gt;&gt;</code> and is populated by reading rows from the <code>citations</code> table. <strong>Click the single line in the diff that introduces a runtime bug:</strong>
+    </p>
+
+    <div class="diff-box" data-diff-spotter>
+      <button type="button" class="diff-line" data-diff-line data-bug="false" data-explanation="Not a bug: ReadAsync advances the cursor row-by-row and forwards cancellationToken.">+ while (await turnsReader.ReadAsync(cancellationToken))</button>
+      <button type="button" class="diff-line" data-diff-line data-bug="false" data-explanation="Not a bug: Column 0 (conversation_id) and Column 1 (id) match SELECT conversation_id, id, sequence_number...">+ {
++     var convId = turnsReader.GetString(0);
++     var turnId = turnsReader.GetString(1);</button>
+      <button type="button" class="diff-line" data-diff-line data-bug="true" data-explanation="Bingo! In C#, indexing a Dictionary with citationsByTurnId[turnId] throws a KeyNotFoundException whenever a key is missing. Any Turn that has 0 citations has no rows in the citations table, so its turnId is absent from citationsByTurnId—crashing GetAllConversationsAsync! Use TryGetValue(turnId, out var turnCitations) instead.">+     var citations = citationsByTurnId[turnId];</button>
+      <button type="button" class="diff-line" data-diff-line data-bug="false" data-explanation="Not a bug: Constructing the positional Turn record with named arguments and ISO-8601 RoundtripKind parsing is completely valid.">+     var turn = new Turn(
++         Id: turnId,
++         SequenceNumber: turnsReader.GetInt32(2),
++         Prompt: turnsReader.GetString(3),
++         Response: turnsReader.GetString(4),
++         CreatedAt: DateTimeOffset.Parse(turnsReader.GetString(5), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
++         Citations: citations);
++ }</button>
+      <div class="feedback-banner" data-diff-feedback></div>
+    </div>
+
+    <h2>5. Retrieval Practice (No-Clue Format)</h2>
+    <p>
+      Test your long-term retention without peeking back up. Select the right answer for each question:
+    </p>
+
+    <div class="quiz-card" data-quiz-card>
+      <p class="quiz-question">1. Why does <code>SaveConversationAsync</code> execute <code>DELETE FROM conversations WHERE id = $id;</code> before inserting the conversation, turns, and citations?</p>
+      <div class="quiz-options">
+        <button type="button" class="quiz-option" data-option data-correct="false" data-explanation="Not quite: VACUUM compacts database pages; DELETE WHERE id = $id removes the existing row for that conversation.">Compacts unused database pages before writing</button>
+        <button type="button" class="quiz-option" data-option data-correct="true" data-explanation="Correct! With PRAGMA foreign_keys = ON and ON DELETE CASCADE, deleting the parent conversation row automatically removes its old turns and citations inside the transaction before inserting the updated ones.">Cascades delete removing old turns atomically</button>
+        <button type="button" class="quiz-option" data-option data-correct="false" data-explanation="Not quite: SaveConversationAsync explicitly enables foreign keys before starting the transaction.">Disables active foreign keys during insertion</button>
+      </div>
+      <div class="feedback-banner" data-feedback></div>
+    </div>
+
+    <div class="quiz-card" data-quiz-card>
+      <p class="quiz-question">2. What happens if an exception is thrown inside <code>SaveConversationAsync</code> before <code>await transaction.CommitAsync(cancellationToken);</code> is reached?</p>
+      <div class="quiz-options">
+        <button type="button" class="quiz-option" data-option data-correct="true" data-explanation="Correct! Because transaction is declared with 'await using var', exiting the method early calls transaction.DisposeAsync() in the compiler-generated finally block, which rolls back any uncommitted changes.">Disposing transaction rolls back all changes</button>
+        <button type="button" class="quiz-option" data-option data-correct="false" data-explanation="Not quite: statements attached to an uncommitted SqliteTransaction are never persisted if CommitAsync is not reached.">Completed SQLite commands remain on database</button>
+        <button type="button" class="quiz-option" data-option data-correct="false" data-explanation="Not quite: Microsoft.Data.Sqlite does not automatically retry failed commands.">Connection retries failed statements in loop</button>
+      </div>
+      <div class="feedback-banner" data-feedback></div>
+    </div>
+
+    <div class="quiz-card" data-quiz-card>
+      <p class="quiz-question">3. Why does <code>GetAllConversationsAsync</code> execute 3 separate <code>SELECT</code> queries and group rows with <code>Dictionary&lt;string, List&lt;T&gt;&gt;</code>?</p>
+      <div class="quiz-options">
+        <button type="button" class="quiz-option" data-option data-correct="false" data-explanation="Not quite: SQLite supports multi-table JOINs just fine, though joining 1-to-many-to-many duplicates parent columns across rows.">SQLite forbids joining three tables together</button>
+        <button type="button" class="quiz-option" data-option data-correct="false" data-explanation="Not quite: DateTimeOffset.Parse works identically regardless of how many queries are executed.">Async readers cannot parse nested timestamps</button>
+        <button type="button" class="quiz-option" data-option data-correct="true" data-explanation="Correct! Fetching conversations, turns, and citations in 3 flat queries and grouping them in memory with Dictionary.TryGetValue avoids running N+1 queries inside nested loops.">Prevents costly N+1 queries on conversations</button>
+      </div>
+      <div class="feedback-banner" data-feedback></div>
+    </div>
+
+    <h2>6. Recommended Primary Source &amp; Next Step</h2>
+    <p>
+      <strong>Primary Source Reading (5 mins):</strong> Skim <a href="https://learn.microsoft.com/en-us/dotnet/standard/data/sqlite/transactions" target="_blank" rel="noopener">Microsoft Learn: Transactions in Microsoft.Data.Sqlite</a> and <a href="https://learn.microsoft.com/en-us/dotnet/standard/data/sqlite/parameters" target="_blank" rel="noopener">Parameters in Microsoft.Data.Sqlite</a> to see how transactions and <code>$param</code> binding work under the hood.
+    </p>
+    <p>
+      <strong>Updated Reference Sheet:</strong> Check <a href="../reference/01-csharp-codebase-cheat-sheet.html">Reference 01: C# / .NET 10 Rosetta Stone</a>, which now includes <code>TryGetValue(key, out var list)</code>, named value tuples, and ISO-8601 <code>"O"</code> formatting.
+    </p>
+
+    <footer class="lesson-footer">
+      <p>
+        <strong>Ask your teacher:</strong> Come back to the chat and let me know how you did on the diff spotter and the 3 retrieval questions—or ask about anything in <code>SqliteConversationRepository.cs</code> that caught your eye!
+      </p>
+    </footer>
+  </main>
+  <script src="../assets/lesson-interactive.js"></script>
+</body>
+</html>

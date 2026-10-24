@@ -10,7 +10,10 @@
   <main>
     <nav class="course-nav">
       <span>Reference 01 &middot; Printable Cheat Sheet</span>
-      <span><a href="../lessons/0001-reading-the-domain-and-seam.html">&larr; Lesson 0001: Domain &amp; Seam</a></span>
+      <span>
+        <a href="../lessons/0001-reading-the-domain-and-seam.html">&larr; Lesson 0001</a> &middot;
+        <a href="../lessons/0002-sqlite-persistence-and-transactions.html">Lesson 0002 &rarr;</a>
+      </span>
     </nav>
 
     <h1>C# 12+ / .NET 10 Rosetta Stone</h1>
@@ -103,6 +106,39 @@
           </td>
           <td>
             Leading whitespace up to the closing <code>"""</code> column is automatically stripped by the C# compiler. Ideal for SQL schemas, HTML templates, and test fixtures.
+          </td>
+        </tr>
+        <tr>
+          <td><code>dict.TryGetValue(key, out var list)</code></td>
+          <td><code>SqliteConversationRepository.cs</code></td>
+          <td>
+            <strong>TS:</strong> <code>const list = map.get(key)</code><br/>
+            <strong>Py:</strong> <code>list = d.get(key)</code>
+          </td>
+          <td>
+            In C#, indexing <code>dict[key]</code> throws <code>KeyNotFoundException</code> when <code>key</code> is absent! Always use <code>TryGetValue(key, out var val)</code> when a key (such as a turn with 0 citations) might not exist.
+          </td>
+        </tr>
+        <tr>
+          <td><code>(string Id, string Title)</code> (Named Value Tuple)</td>
+          <td><code>SqliteConversationRepository.cs</code></td>
+          <td>
+            <strong>TS:</strong> Anonymous object type <code>{ id: string; title: string }</code><br/>
+            <strong>Py:</strong> <code>NamedTuple</code>
+          </td>
+          <td>
+            Lightweight stack-friendly value type for holding temporary query rows inside a method without declaring a separate <code>record</code> type.
+          </td>
+        </tr>
+        <tr>
+          <td><code>date.ToString("O", CultureInfo.InvariantCulture)</code></td>
+          <td><code>SqliteConversationRepository.cs</code><br/><code>MarkdownExporter.cs</code></td>
+          <td>
+            <strong>TS:</strong> <code>date.toISOString()</code><br/>
+            <strong>Py:</strong> <code>dt.isoformat()</code>
+          </td>
+          <td>
+            <code>"O"</code> is the ISO-8601 round-trip format specifier preserving exact sub-second ticks and UTC offset; <code>InvariantCulture</code> prevents OS locale settings from altering separators.
           </td>
         </tr>
       </tbody>
